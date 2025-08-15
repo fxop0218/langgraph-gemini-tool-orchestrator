@@ -8,10 +8,13 @@ from dotenv import load_dotenv
 import os
 import re
 import json
+import pathlib
+from langgraph.checkpoint.memory import MemorySaver
 from typing import Annotated
 from typing_extensions import TypedDict
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
+from typing import List, Dict, Any
 from langchain_core.messages import ToolMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -23,6 +26,9 @@ from tools.fake_prods import (
     create_user,
     get_user_by_id,
 )
+
+
+from tools.product_list import export_products as _export_sorted_products
 
 # Carga variables de entorno desde .env
 load_dotenv()
@@ -70,8 +76,43 @@ def get_user(user_id: int) -> dict:
     return get_user_by_id(user_id)
 
 
+@tool
+def export_sorted_products(
+    payload: List[Dict[str, Any]],
+    order_by: str,
+    file_name: str,
+    file_format: str = "xlsx",
+) -> dict:
+    """
+    Export a product list to CSV/XLSX with a chosen sorting policy.
+
+    Args:
+        payload: List of product dicts (as provided in your example).
+        order_by: "alphabetical" | "price" | "rating" | "category".
+        file_name: Base file name only (no paths). Extension forced by file_format.
+        file_format: "csv" or "xlsx" (default "xlsx").
+
+    Returns:
+        dict with:
+          - path: absolute path of the created file
+          - rows: number of exported rows
+          - columns: exported columns
+          - order_by: applied criterion
+          - file_format: final format
+    """
+    print(payload)
+    return _export_sorted_products(payload, order_by, file_name, file_format)
+
+
 # Lista de todas las herramientas disponibles
-TOOLS = [list_products, get_product, list_users, add_user, get_user]
+TOOLS = [
+    list_products,
+    get_product,
+    list_users,
+    add_user,
+    get_user,
+    export_sorted_products,
+]
 
 # --- Configuración del LLM -------------------------------------
 
@@ -103,11 +144,12 @@ def build_agent():
         tools_condition,
         {"tools": "tools", "__end__": END},
     )
-
     graph_builder.add_edge("tools", "chatbot")
     graph_builder.add_edge(START, "chatbot")
 
-    return graph_builder.compile()
+    # ✅ memoria en RAM (no persiste tras cerrar el proceso)
+    checkpointer = MemorySaver()
+    return graph_builder.compile(checkpointer=checkpointer)
 
 
 # --- Bucle de interacción -----------------------------------------------------
@@ -115,10 +157,13 @@ def build_agent():
 
 def chat():
     agent = build_agent()
-    pending_user_creation = False
+    # un id cualquiera por ejecución; si quieres, cámbialo por timestamp/uuid
+    session_id = "runtime-session"
 
+    pending_user_creation = False
     print("[Agente iniciado con Google Gemini 2.5 Flash y LangGraph]")
-    print("Escribe 'exit' o 'quit' para finalizar.\n")
+    print("Comandos: /session <id>  |  /whoami  |  exit\n")
+    print(f"(Sesión actual efímera: {session_id})\n")
 
     while True:
         user_input = input("You: ").strip()
@@ -126,72 +171,23 @@ def chat():
             print("Agent: Sesión finalizada. Hasta pronto.")
             break
 
-        # Flujo manual: iniciar creación de usuario
-        if not pending_user_creation and re.search(
-            r"crear.*usuario", user_input, re.IGNORECASE
-        ):
-            pending_user_creation = True
-            print(
-                "Agent: Para poder crear el nuevo usuario, necesito la siguiente información:"
-            )
-            print("* ID (número)")
-            print("* Nombre de usuario (texto)")
-            print("* Correo electrónico (texto)")
-            print("* Contraseña (texto)")
-            print("Por favor, proporciónamela en una sola línea, separada por comas.\n")
+        # cambiar de hilo efímero dentro de la misma instancia (opcional)
+        if user_input.startswith("/session "):
+            session_id = user_input.split(" ", 1)[1].strip() or session_id
+            print(f"Agent: Cambiada la sesión efímera a: {session_id}")
+            continue
+        if user_input == "/whoami":
+            print(f"Agent: thread_id actual = {session_id}")
             continue
 
-        # Procesar datos de creación
-        if pending_user_creation:
-            match = re.search(
-                r"id\s*(\d+).*?nombre(?: de usuario)?\s*([^,]+).*?correo(?: electrónico)?\s*([^,]+).*?contraseña\s*(\S+)",
-                user_input,
-                re.IGNORECASE,
-            )
-            if match:
-                user_data = {
-                    "id": int(match.group(1)),
-                    "username": match.group(2).strip(),
-                    "email": match.group(3).strip(),
-                    "password": match.group(4).strip(),
-                }
-                try:
-                    result = add_user(user_data)
-                    print("Agent: Usuario creado correctamente:")
-                    print(json.dumps(result, indent=2, ensure_ascii=False))
-                except Exception as e:
-                    print(f"Agent: Error al crear el usuario: {e}")
-            else:
-                print(
-                    "Agent: No he podido interpretar los datos. Asegúrate de usar el formato correcto."
-                )
-            pending_user_creation = False
-            continue
+        # ... (tus flujos manuales: crear/listar/buscar usuarios) ...
 
-        # Flujo manual: listar usuarios
-        if re.search(r"listar.*usuarios|ver.*usuarios", user_input, re.IGNORECASE):
-            try:
-                users = list_users()
-                print("Agent: Lista de usuarios registrados:")
-                print(json.dumps(users, indent=2, ensure_ascii=False))
-            except Exception as e:
-                print(f"Agent: Error al recuperar usuarios: {e}")
-            continue
+        # ✅ IMPORTANTE: pasar thread_id en config.configurable
+        state = agent.invoke(
+            {"messages": [{"role": "user", "content": user_input}]},
+            config={"configurable": {"thread_id": session_id}},
+        )
 
-        # Flujo manual: buscar usuario por ID
-        match_id = re.search(r"buscar.*usuario.*id\s*(\d+)", user_input, re.IGNORECASE)
-        if match_id:
-            uid = int(match_id.group(1))
-            try:
-                user = get_user(uid)
-                print(f"Agent: Usuario encontrado (ID {uid}):")
-                print(json.dumps(user, indent=2, ensure_ascii=False))
-            except Exception as e:
-                print(f"Agent: Error al buscar el usuario: {e}")
-            continue
-
-        # Flujo por defecto: paso al agente en grafo
-        state = agent.invoke({"messages": [{"role": "user", "content": user_input}]})
         messages = state.get("messages", [])
         if not messages:
             print("Agent: (sin respuesta)")
