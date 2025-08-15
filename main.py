@@ -14,11 +14,14 @@ from typing import Annotated
 from typing_extensions import TypedDict
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.messages import ToolMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
+
+# Tools import
+
 from tools.fake_prods import (
     get_all_products,
     get_product_by_id,
@@ -29,6 +32,7 @@ from tools.fake_prods import (
 
 
 from tools.product_list import export_products as _export_sorted_products
+from tools.csv_editor import edit_products_csv as _edit_products_csv
 
 # Carga variables de entorno desde .env
 load_dotenv()
@@ -104,6 +108,84 @@ def export_sorted_products(
     return _export_sorted_products(payload, order_by, file_name, file_format)
 
 
+@tool
+def edit_products_file(
+    input_csv: str,
+    output_name: str,
+    include_categories: Optional[List[str]] = None,
+    exclude_categories: Optional[List[str]] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    min_rating: Optional[float] = None,
+    keep_columns: Optional[List[str]] = None,
+    drop_columns: Optional[List[str]] = None,
+    dedupe_on: Optional[List[str]] = None,
+    sort_order: Optional[
+        str
+    ] = None,  # "alphabetical" | "price" | "rating" | "category"
+    file_format: str = "csv",  # "csv" (default) or "xlsx"
+    encoding: str = "utf-8-sig",
+    delimiter: str = ",",
+) -> Dict[str, Any]:
+    """
+    Edit a product CSV/XLSX by filtering, selecting columns, deduplicating, sorting, and saving.
+
+    Parameters
+    ----------
+    input_csv : str
+        Path to the input CSV file (must exist).
+    output_name : str
+        Base output file name (NO PATHS). Extension is forced by `file_format`.
+    include_categories / exclude_categories : list[str], optional
+        Case-insensitive category filters.
+    min_price / max_price : float, optional
+        Keep rows within [min_price, max_price].
+    min_rating : float, optional
+        Keep rows with rating_rate >= min_rating.
+    keep_columns : list[str], optional
+        If provided, keep only these columns (intersection with existing).
+    drop_columns : list[str], optional
+        Columns to drop if present.
+    dedupe_on : list[str], optional
+        Subset of columns for deduplication. If None, dedupe by all columns.
+    sort_order : str, optional
+        One of: "alphabetical", "price", "rating", "category".
+    file_format : str, default "csv"
+        Output format ("csv" or "xlsx").
+    encoding : str, default "utf-8-sig"
+        CSV encoding (Excel-friendly).
+    delimiter : str, default ","
+        CSV delimiter.
+
+    Returns
+    -------
+    dict
+        {
+          "path": absolute output path,
+          "rows_before": int,
+          "rows_after": int,
+          "columns": list[str],
+          "applied": list[str]
+        }
+    """
+    return _edit_products_csv(
+        input_csv=input_csv,
+        output_name=output_name,
+        include_categories=include_categories,
+        exclude_categories=exclude_categories,
+        min_price=min_price,
+        max_price=max_price,
+        min_rating=min_rating,
+        keep_columns=keep_columns,
+        drop_columns=drop_columns,
+        dedupe_on=dedupe_on,
+        sort_order=sort_order,
+        file_format=file_format,
+        encoding=encoding,
+        delimiter=delimiter,
+    )
+
+
 # Lista de todas las herramientas disponibles
 TOOLS = [
     list_products,
@@ -171,7 +253,6 @@ def chat():
             print("Agent: Sesión finalizada. Hasta pronto.")
             break
 
-        # cambiar de hilo efímero dentro de la misma instancia (opcional)
         if user_input.startswith("/session "):
             session_id = user_input.split(" ", 1)[1].strip() or session_id
             print(f"Agent: Cambiada la sesión efímera a: {session_id}")
@@ -180,9 +261,6 @@ def chat():
             print(f"Agent: thread_id actual = {session_id}")
             continue
 
-        # ... (tus flujos manuales: crear/listar/buscar usuarios) ...
-
-        # ✅ IMPORTANTE: pasar thread_id en config.configurable
         state = agent.invoke(
             {"messages": [{"role": "user", "content": user_input}]},
             config={"configurable": {"thread_id": session_id}},
