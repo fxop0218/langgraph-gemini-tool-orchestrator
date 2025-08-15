@@ -1,27 +1,17 @@
-"""
-Agente basado en LangGraph con Google Gemini y herramientas para productos y usuarios.
-Carga variables de entorno usando python-dotenv.
-Incluye flujos específicos para creación, listado y búsqueda de usuarios por ID sin depender únicamente del LLM.
-"""
-
+from __future__ import annotations
 from dotenv import load_dotenv
 import os
-import re
-import json
-import pathlib
 from langgraph.checkpoint.memory import MemorySaver
-from typing import Annotated
+from typing import Annotated, List, Dict, Any, Optional
 from typing_extensions import TypedDict
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
-from typing import List, Dict, Any, Optional
 from langchain_core.messages import ToolMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 # Tools import
-
 from tools.fake_prods import (
     get_all_products,
     get_product_by_id,
@@ -29,54 +19,140 @@ from tools.fake_prods import (
     create_user,
     get_user_by_id,
 )
-
-
 from tools.product_list import export_products as _export_sorted_products
 from tools.csv_editor import edit_products_csv as _edit_products_csv
+from tools.excel_editor import edit_products_excel as _edit_products_excel
 
-# Carga variables de entorno desde .env
+# Load environment variables from .env
 load_dotenv()
-
-# --- Definición del estado del grafo -----------------------------------------
 
 
 class State(TypedDict):
+    """Graph state container.
+
+    Attributes
+    ----------
+    messages : list
+        Accumulated conversation history. The list is managed by `add_messages`
+        to ensure proper LangGraph semantics (append-only with tool routing).
+    """
+
     messages: Annotated[list, add_messages]
-
-
-# --- Definición de herramientas con @tool ------------------------------------
 
 
 @tool
 def list_products() -> list:
-    """Recupera la lista completa de productos."""
+    """Return the full catalog of products.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Returns the complete product list as a JSON-serializable array.
+
+    Returns
+    -------
+    list
+        List of product dicts. Each item typically contains keys like:
+        `id`, `title`, `price`, `category`, `description`, `image`, and `rating`.
+    """
     return get_all_products()
 
 
 @tool
 def get_product(product_id: int) -> dict:
-    """Recupera detalle de un producto por su ID."""
+    """Retrieve product details by ID.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Fetch a single product given its numeric `product_id`.
+
+    Parameters
+    ----------
+    product_id : int
+        Unique numeric identifier of the product.
+
+    Returns
+    -------
+    dict
+        Product record if found. May raise if the ID does not exist.
+
+    Raises
+    ------
+    KeyError
+        If the product is not found by the underlying data source.
+    """
     return get_product_by_id(product_id)
 
 
 @tool
 def list_users() -> list:
-    """Recupera todos los usuarios registrados."""
+    """Return all registered users.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Lists all users as JSON-serializable objects.
+
+    Returns
+    -------
+    list
+        List of user dicts with canonical fields such as `id`, `username`,
+        `email`, and other profile attributes in the backing store.
+    """
     return get_all_users()
 
 
 @tool
 def add_user(user_data: dict) -> dict:
-    """
-    Crea un nuevo usuario.
-    `user_data` debe incluir: id (int), username (str), email (str), password (str).
+    """Create a new user.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Persists a user with required fields and returns the created record.
+
+    Parameters
+    ----------
+    user_data : dict
+        Input payload. Required keys:
+        - `id` (int)
+        - `username` (str)
+        - `email` (str)
+        - `password` (str)
+
+    Returns
+    -------
+    dict
+        Newly created user payload as stored by the data layer.
+
+    Raises
+    ------
+    ValueError
+        If required keys are missing or invalid.
     """
     return create_user(user_data)
 
 
 @tool
 def get_user(user_id: int) -> dict:
-    """Recupera un usuario por su ID."""
+    """Retrieve a user by ID.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Fetch a single user record by numeric `user_id`.
+
+    Parameters
+    ----------
+    user_id : int
+        Unique numeric identifier of the user.
+
+    Returns
+    -------
+    dict
+        User record if found.
+
+    Raises
+    ------
+    KeyError
+        If the user does not exist.
+    """
     return get_user_by_id(user_id)
 
 
@@ -87,25 +163,52 @@ def export_sorted_products(
     file_name: str,
     file_format: str = "xlsx",
 ) -> dict:
-    """
-    Export a product list to CSV/XLSX with a chosen sorting policy.
+    """Export products to CSV/XLSX with deterministic sorting.
 
-    Args:
-        payload: List of product dicts (as provided in your example).
-        order_by: "alphabetical" | "price" | "rating" | "category".
-        file_name: Base file name only (no paths). Extension forced by file_format.
-        file_format: "csv" or "xlsx" (default "xlsx").
+    Short Description (for LLMs)
+    ----------------------------
+    Sort products by a policy (alphabetical/price/rating/category) and export to a file.
 
-    Returns:
-        dict with:
-          - path: absolute path of the created file
-          - rows: number of exported rows
-          - columns: exported columns
-          - order_by: applied criterion
-          - file_format: final format
+    Parameters
+    ----------
+    payload : list of dict
+        Array of product objects. Missing rating fields are tolerated.
+    order_by : {"alphabetical", "price", "rating", "category"}
+        Sorting policy (case-insensitive).
+    file_name : str
+        Safe base name (no paths). Extension is forced by `file_format`.
+    file_format : {"csv", "xlsx"}, default "xlsx"
+        Output format.
+
+    Returns
+    -------
+    dict
+        {
+          "path": str,           # absolute output path
+          "rows": int,           # number of exported rows
+          "columns": list[str],  # exported columns
+          "order_by": str,       # applied sorting criterion
+          "file_format": str     # resulting format
+        }
+
+    Notes
+    -----
+    The underlying implementation ensures stable sorting (`mergesort`) and
+    safe filename sanitation.
     """
-    print(payload)
-    return _export_sorted_products(payload, order_by, file_name, file_format)
+    out_path = _export_sorted_products(payload, order_by, file_name, file_format)
+    # Best-effort metadata build; avoid heavy I/O
+    # Defer reading back the file to keep the tool side-effect light.
+    meta = {
+        "path": out_path,
+        "rows": len(payload) if isinstance(payload, list) else 0,
+        "columns": (
+            list(payload[0].keys()) if payload and isinstance(payload[0], dict) else []
+        ),
+        "order_by": order_by,
+        "file_format": file_format.lower(),
+    }
+    return meta
 
 
 @tool
@@ -120,38 +223,39 @@ def edit_products_file(
     keep_columns: Optional[List[str]] = None,
     drop_columns: Optional[List[str]] = None,
     dedupe_on: Optional[List[str]] = None,
-    sort_order: Optional[
-        str
-    ] = None,  # "alphabetical" | "price" | "rating" | "category"
-    file_format: str = "csv",  # "csv" (default) or "xlsx"
+    sort_order: Optional[str] = None,
+    file_format: str = "csv",
     encoding: str = "utf-8-sig",
     delimiter: str = ",",
 ) -> Dict[str, Any]:
-    """
-    Edit a product CSV/XLSX by filtering, selecting columns, deduplicating, sorting, and saving.
+    """Edit and export a product table (CSV→CSV/XLSX) with filters and sorting.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Loads a CSV, applies filters (category/price/rating), column ops, dedupe, sort, and writes to CSV/XLSX.
 
     Parameters
     ----------
     input_csv : str
-        Path to the input CSV file (must exist).
+        Existing CSV path to read.
     output_name : str
-        Base output file name (NO PATHS). Extension is forced by `file_format`.
-    include_categories / exclude_categories : list[str], optional
+        Base name only (no paths). Extension derived from `file_format`.
+    include_categories, exclude_categories : list[str], optional
         Case-insensitive category filters.
-    min_price / max_price : float, optional
-        Keep rows within [min_price, max_price].
+    min_price, max_price : float, optional
+        Price range boundaries (inclusive).
     min_rating : float, optional
-        Keep rows with rating_rate >= min_rating.
+        Minimum `rating_rate`.
     keep_columns : list[str], optional
-        If provided, keep only these columns (intersection with existing).
+        Whitelist columns (intersection with existing).
     drop_columns : list[str], optional
         Columns to drop if present.
     dedupe_on : list[str], optional
-        Subset of columns for deduplication. If None, dedupe by all columns.
-    sort_order : str, optional
-        One of: "alphabetical", "price", "rating", "category".
-    file_format : str, default "csv"
-        Output format ("csv" or "xlsx").
+        Subset of columns to consider for duplicate removal. If None, full-row dedupe.
+    sort_order : {"alphabetical", "price", "rating", "category"}, optional
+        Sorting policy.
+    file_format : {"csv", "xlsx"}, default "csv"
+        Output format.
     encoding : str, default "utf-8-sig"
         CSV encoding (Excel-friendly).
     delimiter : str, default ","
@@ -161,12 +265,19 @@ def edit_products_file(
     -------
     dict
         {
-          "path": absolute output path,
+          "path": str,            # absolute output path
           "rows_before": int,
           "rows_after": int,
           "columns": list[str],
           "applied": list[str]
         }
+
+    Raises
+    ------
+    FileNotFoundError
+        If `input_csv` does not exist.
+    ValueError
+        On invalid parameters or unsafe `output_name`.
     """
     return _edit_products_csv(
         input_csv=input_csv,
@@ -186,7 +297,120 @@ def edit_products_file(
     )
 
 
-# Lista de todas las herramientas disponibles
+@tool
+def edit_products_excel(
+    input_name: Optional[str] = None,
+    input_excel: Optional[str] = None,
+    output_name: Optional[str] = None,
+    in_place: bool = False,
+    sheet_name: Optional[str] = None,
+    include_categories: Optional[List[str]] = None,
+    exclude_categories: Optional[List[str]] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    min_rating: Optional[float] = None,
+    keep_columns: Optional[List[str]] = None,
+    drop_columns: Optional[List[str]] = None,
+    dedupe_on: Optional[List[str]] = None,
+    sort_order: Optional[str] = None,
+    output_sheet: str = "Edited",
+    remove_ids: Optional[List] = None,
+    remove_equals: Optional[Dict[str, List]] = None,
+    remove_contains: Optional[Dict[str, List[str]]] = None,
+    remove_regex: Optional[Dict[str, str]] = None,
+    remove_nulls_in: Optional[List[str]] = None,
+    remove_zero_in: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Edit an Excel workbook by name or explicit path and persist changes.
+
+    Short Description (for LLMs)
+    ----------------------------
+    Reads `.xlsx`, applies filters and deletion rules, column ops, dedupe, sort, and writes back.
+
+    Parameters
+    ----------
+    input_name : str, optional
+        Safe base name under `files/excel/` (preferred; no paths).
+    input_excel : str, optional
+        Explicit file path (legacy). Ignored if `input_name` is provided.
+    output_name : str, optional
+        Base name for output (ignored if `in_place=True`).
+    in_place : bool, default False
+        If True, overwrites the input safely (temp file + atomic replace).
+    sheet_name : str, optional
+        Sheet to read. If None, default sheet is used.
+    include_categories, exclude_categories : list[str], optional
+        Category filters (case-insensitive).
+    min_price, max_price : float, optional
+        Price range boundaries (inclusive).
+    min_rating : float, optional
+        Minimum `rating_rate`.
+    keep_columns, drop_columns : list[str], optional
+        Column-level selection/removal.
+    dedupe_on : list[str], optional
+        Columns used for duplicate removal. If None, full-row dedupe.
+    sort_order : {"alphabetical", "price", "rating", "category"}, optional
+        Sorting policy.
+    output_sheet : str, default "Edited"
+        Destination sheet name (max 31 chars).
+    remove_ids : list, optional
+        Remove rows whose `id` is in the provided list.
+    remove_equals : dict[str, list], optional
+        Remove rows where `df[col]` is in list for each specified column.
+    remove_contains : dict[str, list[str]], optional
+        Remove rows if any substring matches (case-insensitive) in specified columns.
+    remove_regex : dict[str, str], optional
+        Remove rows if regex matches in specified columns.
+    remove_nulls_in : list[str], optional
+        Drop rows with NULLs in any of the given columns.
+    remove_zero_in : list[str], optional
+        Drop rows where ANY of the numeric columns equals zero.
+
+    Returns
+    -------
+    dict
+        {
+          "path": str,
+          "rows_before": int,
+          "rows_after": int,
+          "columns": list[str],
+          "applied": list[str],
+          "in_place": bool
+        }
+
+    Raises
+    ------
+    FileNotFoundError
+        If the input `.xlsx` cannot be found.
+    ValueError
+        On invalid parameters or unsafe filenames.
+    """
+    return _edit_products_excel(
+        input_excel=input_excel,
+        output_name=output_name,
+        input_name=input_name,
+        in_place=in_place,
+        sheet_name=sheet_name,
+        include_categories=include_categories,
+        exclude_categories=exclude_categories,
+        min_price=min_price,
+        max_price=max_price,
+        min_rating=min_rating,
+        keep_columns=keep_columns,
+        drop_columns=drop_columns,
+        dedupe_on=dedupe_on,
+        sort_order=sort_order,
+        output_sheet=output_sheet,
+        engine_read=None,
+        remove_ids=remove_ids,
+        remove_equals=remove_equals,
+        remove_contains=remove_contains,
+        remove_regex=remove_regex,
+        remove_nulls_in=remove_nulls_in,
+        remove_zero_in=remove_zero_in,
+    )
+
+
 TOOLS = [
     list_products,
     get_product,
@@ -196,25 +420,47 @@ TOOLS = [
     export_sorted_products,
 ]
 
-# --- Configuración del LLM -------------------------------------
-
 
 def configure_llm():
+    """Initialize Gemini 2.5 Flash client.
+
+    Returns
+    -------
+    langchain.chat_models.base.BaseChatModel
+        Configured chat model bound to Google GenAI.
+
+    Raises
+    ------
+    RuntimeError
+        If `GOOGLE_API_KEY` is not present in the environment.
+    """
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        raise RuntimeError("Debe definir GOOGLE_API_KEY en el entorno (.env)")
-    # Inicializa Gemini 2.5 Flash vía Google Studio
+        raise RuntimeError("GOOGLE_API_KEY must be set in the environment (.env).")
     return init_chat_model(model="google_genai:gemini-2.5-flash", api_key=api_key)
 
 
-# --- Montaje del grafo de ejecución -------------------------------------------
-
-
 def build_agent():
+    """Build and compile the LangGraph agent with tool routing.
+
+    Pipeline
+    --------
+    - Bind tools to the LLM.
+    - Add `chatbot` (model inference) and `tools` (execution) nodes.
+    - Conditional edge from `chatbot` to `tools` using `tools_condition`.
+    - Feedback edge from `tools` back to `chatbot`.
+    - In-memory checkpointing via `MemorySaver`.
+
+    Returns
+    -------
+    langgraph.graph.compiler.CompiledGraph
+        Ready-to-invoke graph with checkpointing enabled.
+    """
     llm = configure_llm()
     llm_with_tools = llm.bind_tools(TOOLS)
 
     def chatbot(state: State):
+        """Single-step LLM invocation node compatible with LangGraph state."""
         return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
     graph_builder = StateGraph(State)
@@ -229,36 +475,42 @@ def build_agent():
     graph_builder.add_edge("tools", "chatbot")
     graph_builder.add_edge(START, "chatbot")
 
-    # ✅ memoria en RAM (no persiste tras cerrar el proceso)
     checkpointer = MemorySaver()
     return graph_builder.compile(checkpointer=checkpointer)
 
 
-# --- Bucle de interacción -----------------------------------------------------
-
-
 def chat():
+    """Simple CLI loop to interact with the agent.
+
+    Commands
+    --------
+    /session <id> : switch ephemeral `thread_id`
+    /whoami       : print current `thread_id`
+    exit/quit     : terminate loop
+
+    Side Effects
+    ------------
+    Prints agent outputs to stdout and reads user input from stdin.
+    """
     agent = build_agent()
-    # un id cualquiera por ejecución; si quieres, cámbialo por timestamp/uuid
     session_id = "runtime-session"
 
-    pending_user_creation = False
-    print("[Agente iniciado con Google Gemini 2.5 Flash y LangGraph]")
-    print("Comandos: /session <id>  |  /whoami  |  exit\n")
-    print(f"(Sesión actual efímera: {session_id})\n")
+    print("[Agent initialized: Google Gemini 2.5 Flash + LangGraph]")
+    print("Commands: /session <id>  |  /whoami  |  exit\n")
+    print(f"(Ephemeral session: {session_id})\n")
 
     while True:
         user_input = input("You: ").strip()
         if user_input.lower() in ("exit", "quit"):
-            print("Agent: Sesión finalizada. Hasta pronto.")
+            print("Agent: Session ended. Goodbye.")
             break
 
         if user_input.startswith("/session "):
             session_id = user_input.split(" ", 1)[1].strip() or session_id
-            print(f"Agent: Cambiada la sesión efímera a: {session_id}")
+            print(f"Agent: Switched ephemeral session to: {session_id}")
             continue
         if user_input == "/whoami":
-            print(f"Agent: thread_id actual = {session_id}")
+            print(f"Agent: current thread_id = {session_id}")
             continue
 
         state = agent.invoke(
@@ -268,7 +520,7 @@ def chat():
 
         messages = state.get("messages", [])
         if not messages:
-            print("Agent: (sin respuesta)")
+            print("Agent: (no response)")
             continue
 
         reply = messages[-1]
