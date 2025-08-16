@@ -5,6 +5,9 @@
     <meta charset="utf-8" />
     <title>Chat de Sesión · Generador de Archivos</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Markdown (parser + sanitizer) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
     <style>
         :root {
             --bg: #07140d;
@@ -18,7 +21,6 @@
             --bubble: #0b1c13;
             --bubble-user: #10311f;
             --tool: #0f281b;
-            --warn: #ff6b6b;
         }
 
         * {
@@ -143,12 +145,12 @@
             background: #0c2117;
             padding: 12px 14px;
             border-radius: 12px;
-            white-space: pre-wrap;
             border: 1px solid var(--border)
         }
 
         .msg.user .bubble {
-            background: var(--bubble-user)
+            background: var(--bubble-user);
+            white-space: pre-wrap
         }
 
         .msg.tool .bubble {
@@ -185,7 +187,7 @@
             padding: 2px 6px;
             border-radius: 6px;
             border: 1px solid var(--border);
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-family: ui-monospace, Menlo, Consolas, monospace;
             font-size: 12px
         }
 
@@ -202,18 +204,6 @@
             border: 1px solid var(--border)
         }
 
-        .pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            background: #0f281b;
-            border: 1px solid var(--border);
-            padding: 2px 8px;
-            border-radius: 999px;
-            font-size: 11px;
-            color: var(--muted)
-        }
-
         .divider {
             height: 1px;
             background: var(--border);
@@ -226,7 +216,35 @@
             margin-top: 24px
         }
 
-        /* barras de scroll discretas */
+        /* Markdown defaults dentro de burbujas */
+        .bubble :where(p, ol, ul) {
+            margin: 0 0 .6em 0
+        }
+
+        .bubble ul {
+            padding-left: 1.25em
+        }
+
+        .bubble ol {
+            padding-left: 1.4em
+        }
+
+        .bubble code {
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            background: #0a1a12;
+            padding: .1em .35em;
+            border: 1px solid var(--border);
+            border-radius: 6px
+        }
+
+        .bubble pre {
+            background: #0a1a12;
+            border: 1px solid var(--border);
+            padding: 10px;
+            border-radius: 10px;
+            overflow: auto
+        }
+
         ::-webkit-scrollbar {
             height: 10px;
             width: 10px
@@ -279,30 +297,28 @@
             <div class="header">
                 <h2>Archivos de la sesión</h2>
                 <div class="row">
-                    <button class="btn secondary" id="refreshBtn"
-                        title="Volver a procesar últimos eventos">Refrescar</button>
-                    <button class="btn secondary" id="clearFilesBtn" title="Vaciar lista local">Limpiar lista</button>
+                    <button class="btn secondary" id="refreshBtn">Refrescar</button>
+                    <button class="btn secondary" id="clearFilesBtn">Limpiar lista</button>
                 </div>
             </div>
             <div class="files" id="filesList">
                 <div class="empty">Aún no hay archivos. Cuando las herramientas creen CSV/XLSX, aparecerán aquí.</div>
             </div>
             <div class="divider"></div>
-            <div class="muted">Los ficheros se sirven desde <span class="pill">/files</span> del mismo servidor.</div>
+            <div class="muted">Los ficheros se sirven desde <code>/files</code> del mismo servidor.</div>
         </div>
     </div>
 
     <script>
-        // ===== Config: mismo origen (sirviendo index.html desde FastAPI) =====
+        // === Config: mismo origen ===
         const API_BASE = window.location.origin;
 
-        // ===== Estado =====
+        // === Estado ===
         let sessionId = localStorage.getItem("session_id") || null;
         const filesSeen = new Map(); // url -> meta
 
-        // ===== Utilidades =====
+        // === Helpers ===
         const $ = (sel) => document.querySelector(sel);
-
         function setSessionChip(id) { $("#sessionChip").textContent = `sesión: ${id}`; }
 
         async function ensureSession() {
@@ -316,6 +332,13 @@
             return sessionId;
         }
 
+        function renderMarkdown(md) {
+            // Config mínima para marked (puedes ajustar si quieres tablas, breaks, etc.)
+            marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+            const html = marked.parse(md || "");
+            return DOMPurify.sanitize(html);
+        }
+
         function renderMessage(role, content) {
             const log = $("#chatLog");
             const wrap = document.createElement("div");
@@ -325,8 +348,16 @@
             who.textContent = role === "user" ? "Tú" : (role === "tool" ? "Tool" : "Bot");
             const bubble = document.createElement("div");
             bubble.className = "bubble";
-            if (typeof content === "string") { bubble.textContent = content; }
-            else { bubble.textContent = JSON.stringify(content, null, 2); }
+
+            if (role === "user") {
+                // usuario → texto plano
+                bubble.textContent = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+            } else {
+                // bot/tool → Markdown sanitzado
+                const md = typeof content === "string" ? content : "```json\n" + JSON.stringify(content, null, 2) + "\n```";
+                bubble.innerHTML = renderMarkdown(md);
+            }
+
             wrap.appendChild(who); wrap.appendChild(bubble);
             log.appendChild(wrap);
             log.scrollTop = log.scrollHeight;
@@ -383,14 +414,15 @@
                 });
                 if (!r.ok) {
                     const err = await r.text();
-                    renderMessage("bot", `Error ${r.status}: ${err}`); return;
+                    renderMessage("bot", `**Error ${r.status}:** ${err}`); return;
                 }
                 const data = await r.json();
                 renderMessage("bot", data.reply || "(empty)");
 
                 if (Array.isArray(data.tool_events)) {
                     for (const ev of data.tool_events) {
-                        renderMessage("tool", `[${ev.name}] ${typeof ev.content === "string" ? ev.content : JSON.stringify(ev.content)}`);
+                        const pretty = typeof ev.content === "string" ? ev.content : "```json\n" + JSON.stringify(ev.content, null, 2) + "\n```";
+                        renderMessage("tool", `**${ev.name}**\n\n${pretty}`);
                         const c = ev.content;
                         try {
                             if (c && typeof c === "object") {
@@ -413,19 +445,17 @@
                 }
             } catch (e) {
                 console.error("Fetch error:", e);
-                renderMessage("bot", `Excepción de red: ${e?.message || e}. Revisa que la API esté en ${API_BASE}.`);
+                renderMessage("bot", `**Excepción de red:** ${e?.message || e}. Verifica que la API esté en \`${API_BASE}\`.`);
             } finally {
                 $("#sendBtn").disabled = false; $("#message").focus();
             }
         }
 
-        // ===== Init =====
         (async function init() {
             await ensureSession();
             renderMessage("bot", "Sesión inicializada. ¿En qué puedo ayudar?");
         })();
 
-        // ===== Eventos UI =====
         $("#sendBtn").addEventListener("click", sendMessage);
         $("#message").addEventListener("keydown", (ev) => {
             if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); sendMessage(); }
